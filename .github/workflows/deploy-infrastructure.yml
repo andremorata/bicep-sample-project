@@ -1,0 +1,133 @@
+name: Deploy Azure Infrastructure
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.azure/infrastructure/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '.azure/infrastructure/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Ambiente para deploy (dev, test, prod)'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - test
+          - prod
+
+# Configuração de permissões para OIDC com Azure
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  validate:
+    name: Validar Templates Bicep
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Instalar Bicep CLI
+        run: az bicep install
+
+      - name: Validar templates Bicep
+        run: |
+          az bicep build --file .azure/infrastructure/main.bicep --stdout
+          echo "Template Bicep validado com sucesso!"
+
+  deploy:
+    name: Deploy da Infraestrutura
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Login no Azure via OIDC
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Determinar o nome do grupo de recursos e outros parâmetros
+        id: params
+        run: |
+          # Define o sufixo do ambiente baseado no ambiente selecionado
+          ENV="${{ github.event.inputs.environment || 'dev' }}"
+          
+          # Define o nome do grupo de recursos
+          if [ "$ENV" = "prod" ]; then
+            RG_NAME="rg-bicep-prod"
+            LOCATION="brazilsouth"
+          elif [ "$ENV" = "test" ]; then
+            RG_NAME="rg-bicep-test"
+            LOCATION="eastus"
+          else
+            RG_NAME="rg-bicep-dev"
+            LOCATION="eastus"
+          fi
+          
+          echo "::set-output name=resource_group::$RG_NAME"
+          echo "::set-output name=location::$LOCATION"
+          echo "::set-output name=environment::$ENV"
+      
+      - name: Criar grupo de recursos se não existir
+        run: |
+          if ! az group show --name ${{ steps.params.outputs.resource_group }} &> /dev/null; then
+            az group create --name ${{ steps.params.outputs.resource_group }} --location ${{ steps.params.outputs.location }}
+            echo "Grupo de recursos ${{ steps.params.outputs.resource_group }} criado."
+          else
+            echo "Grupo de recursos ${{ steps.params.outputs.resource_group }} já existe."
+          fi
+
+      - name: Deploy da infraestrutura Bicep
+        run: |
+          ENV=${{ steps.params.outputs.environment }}
+          PARAMS_FILE=".azure/infrastructure/main.parameters.$ENV.json"
+          
+          # Verifica se existe um arquivo de parâmetros específico para o ambiente
+          if [ ! -f "$PARAMS_FILE" ]; then
+            PARAMS_FILE=".azure/infrastructure/main.parameters.dev.json"
+            echo "Arquivo de parâmetros específico para $ENV não encontrado. Usando parâmetros de desenvolvimento."
+          fi
+          
+          # Executa o deployment com o arquivo de parâmetros apropriado
+          az deployment group create \
+            --resource-group ${{ steps.params.outputs.resource_group }} \
+            --template-file .azure/infrastructure/main.bicep \
+            --parameters @$PARAMS_FILE \
+            --parameters environmentName=${{ steps.params.outputs.environment }}
+            
+      - name: Obter outputs do deployment
+        id: deployment-outputs
+        run: |
+          OUTPUTS=$(az deployment group show \
+            --resource-group ${{ steps.params.outputs.resource_group }} \
+            --name main \
+            --query properties.outputs \
+            --output json)
+            
+          echo "::set-output name=deployment_outputs::$OUTPUTS"
+          
+          # Exibe URLs e recursos importantes
+          FRONTEND_URL=$(echo $OUTPUTS | jq -r '.frontendUrl.value')
+          BACKEND_URL=$(echo $OUTPUTS | jq -r '.backendUrl.value')
+          KEYVAULT_NAME=$(echo $OUTPUTS | jq -r '.keyVaultName.value')
+          
+          echo "Frontend URL: $FRONTEND_URL"
+          echo "Backend URL: $BACKEND_URL"
+          echo "Key Vault: $KEYVAULT_NAME"
+        
+      - name: Logout do Azure
+        run: az logout
+        if: always()
