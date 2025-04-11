@@ -1,4 +1,4 @@
-# Projeto Azure Bicep: Frontend Next.js e Backend .NET 9 WebAPI
+# Projeto de IaC com Azure Bicep
 
 Este projeto demonstra conceitos de Infraestrutura como Código (IaC) usando Azure Bicep com uma abordagem modular. Ele implanta uma arquitetura de aplicação web moderna com:
 
